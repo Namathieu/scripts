@@ -15,11 +15,6 @@ set -Eeuo pipefail
 #   - cert-manager
 #   - Rancher
 #
-# Does NOT install:
-#   - Azure DevOps Agent
-#   - Monitoring
-#   - Applications
-#   - Terminal customization (reserved at the bottom)
 # ==============================================================================
 
 
