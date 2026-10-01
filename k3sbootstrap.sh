@@ -93,6 +93,21 @@ else
 
 fi
 
+if ! [[ "$SERVER_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    echo
+    echo "[ERROR] Server IP address is not a valid IPv4 address: $SERVER_IP"
+    exit 1
+fi
+
+IFS=. read -r -a SERVER_IP_OCTETS <<<"$SERVER_IP"
+for OCTET in "${SERVER_IP_OCTETS[@]}"; do
+    if (( 10#$OCTET > 255 )); then
+        echo
+        echo "[ERROR] Server IP address is not a valid IPv4 address: $SERVER_IP"
+        exit 1
+    fi
+done
+
 
 # ------------------------------------------------------------------------------
 # Rancher hostname
@@ -114,24 +129,11 @@ echo
 read -rp "Rancher hostname [$DEFAULT_RANCHER_HOST]: " RANCHER_HOST
 RANCHER_HOST="${RANCHER_HOST:-$DEFAULT_RANCHER_HOST}"
 
-
-# ------------------------------------------------------------------------------
-# Rancher bootstrap password
-# ------------------------------------------------------------------------------
-
-echo
-echo "Choose the initial Rancher administrator password."
-echo "Your typing will be hidden."
-echo
-
-RANCHER_PASSWORD=""
-
-while [[ -z "$RANCHER_PASSWORD" ]]; do
-
-    read -rsp "Rancher bootstrap password: " RANCHER_PASSWORD
+if [[ ${#RANCHER_HOST} -gt 253 || ! "$RANCHER_HOST" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*$ ]]; then
     echo
-
-done
+    echo "[ERROR] Rancher hostname is not a valid DNS hostname: $RANCHER_HOST"
+    exit 1
+fi
 
 
 # ------------------------------------------------------------------------------
@@ -153,7 +155,7 @@ echo
 echo "Rancher:"
 echo "  Address         https://$RANCHER_HOST"
 echo
-echo "The Rancher password is intentionally not displayed."
+echo "For a new Rancher installation, the bootstrap password will be requested later."
 echo
 echo "Nothing has been changed yet."
 echo
@@ -182,31 +184,39 @@ esac
 
 
 # ==============================================================================
-# 1/9 - UPDATE UBUNTU
+# 1/10 - UPDATE UBUNTU
 # ==============================================================================
 
 echo
 echo "======================================================================"
-echo "[1/9] Updating Ubuntu"
+echo "[1/10] Updating Ubuntu"
 echo "======================================================================"
 
 export DEBIAN_FRONTEND=noninteractive
 
-apt-get update
-apt-get full-upgrade -y
-apt-get autoremove -y
+OS_UPGRADE_MARKER="/var/lib/k3s-rancher-bootstrap-os-upgrade-complete"
 
-echo
-echo "[OK] Ubuntu updated."
+if [[ -f "$OS_UPGRADE_MARKER" ]]; then
+    echo
+    echo "[INFO] Initial Ubuntu upgrade already completed by this bootstrap; skipping full-upgrade and autoremove."
+else
+    apt-get update
+    apt-get full-upgrade -y
+    apt-get autoremove -y
+    touch "$OS_UPGRADE_MARKER"
+
+    echo
+    echo "[OK] Ubuntu updated."
+fi
 
 
 # ==============================================================================
-# 2/9 - BASIC UTILITIES
+# 2/10 - BASIC UTILITIES
 # ==============================================================================
 
 echo
 echo "======================================================================"
-echo "[2/9] Installing basic utilities"
+echo "[2/10] Installing basic utilities"
 echo "======================================================================"
 
 apt-get install -y \
@@ -224,12 +234,12 @@ echo "[OK] Basic utilities installed."
 
 
 # ==============================================================================
-# 3/9 - QEMU GUEST AGENT
+# 3/10 - QEMU GUEST AGENT
 # ==============================================================================
 
 echo
 echo "======================================================================"
-echo "[3/9] Installing QEMU Guest Agent"
+echo "[3/10] Installing QEMU Guest Agent"
 echo "======================================================================"
 
 apt-get install -y qemu-guest-agent
@@ -254,12 +264,87 @@ fi
 
 
 # ==============================================================================
-# 4/9 - PREPARE UBUNTU FOR K3S
+# 4/10 - CONFIGURE VIRTIOFS DATA MOUNT
 # ==============================================================================
 
 echo
 echo "======================================================================"
-echo "[4/9] Preparing Ubuntu for K3s"
+echo "[4/10] Configuring VirtioFS data mount"
+echo "======================================================================"
+
+mkdir -p /mnt/data
+
+# Preserve the original fstab before adding the persistent VirtioFS entry.
+if [[ ! -f /etc/fstab.pre-k3s ]]; then
+    cp /etc/fstab /etc/fstab.pre-k3s
+fi
+
+# Refuse to interfere with any filesystem other than the expected share.
+if findmnt -rn -M /mnt/data >/dev/null; then
+    MOUNT_TYPE="$(findmnt -rn -M /mnt/data -o FSTYPE)"
+    MOUNT_SOURCE="$(findmnt -rn -M /mnt/data -o SOURCE)"
+
+    if [[ "$MOUNT_TYPE" != "virtiofs" || "$MOUNT_SOURCE" != "data" ]]; then
+        echo
+        echo "[ERROR] /mnt/data is already mounted from '$MOUNT_SOURCE' as '$MOUNT_TYPE'."
+        echo "Expected VirtioFS source 'data'. No changes were made to that mount."
+        exit 1
+    fi
+fi
+
+# Accept one semantically exact entry, but reject duplicates or competing
+# active entries for this mount point.
+FSTAB_CORRECT_COUNT="$(awk '
+    /^[[:space:]]*#/ || NF == 0 { next }
+    $2 == "/mnt/data" && $1 == "data" && $3 == "virtiofs" && $4 == "defaults,nofail" && $5 == "0" && $6 == "0" { count++ }
+    END { print count + 0 }
+' /etc/fstab)"
+FSTAB_TARGET_COUNT="$(awk '
+    /^[[:space:]]*#/ || NF == 0 { next }
+    $2 == "/mnt/data" { count++ }
+    END { print count + 0 }
+' /etc/fstab)"
+
+if (( FSTAB_CORRECT_COUNT > 1 )); then
+    echo
+    echo "[ERROR] Multiple active VirtioFS entries for /mnt/data exist in /etc/fstab."
+    exit 1
+elif (( FSTAB_TARGET_COUNT > FSTAB_CORRECT_COUNT )); then
+    echo
+    echo "[ERROR] A conflicting active /mnt/data entry exists in /etc/fstab."
+    echo "Resolve it manually; the bootstrap did not rewrite /etc/fstab."
+    exit 1
+elif (( FSTAB_CORRECT_COUNT == 0 )); then
+    printf '%s\n' 'data /mnt/data virtiofs defaults,nofail 0 0' >>/etc/fstab
+    systemctl daemon-reload
+fi
+
+if ! findmnt -rn -M /mnt/data >/dev/null; then
+    if ! mount /mnt/data; then
+        echo
+        echo "[ERROR] Unable to mount VirtioFS source 'data' at /mnt/data."
+        exit 1
+    fi
+fi
+
+if [[ "$(findmnt -rn -M /mnt/data -o FSTYPE)" != "virtiofs" || \
+      "$(findmnt -rn -M /mnt/data -o SOURCE)" != "data" ]]; then
+    echo
+    echo "[ERROR] /mnt/data is not mounted from VirtioFS source 'data'."
+    exit 1
+fi
+
+echo
+echo "[OK] VirtioFS data share mounted at /mnt/data."
+
+
+# ==============================================================================
+# 5/10 - PREPARE UBUNTU FOR K3S
+# ==============================================================================
+
+echo
+echo "======================================================================"
+echo "[5/10] Preparing Ubuntu for K3s"
 echo "======================================================================"
 
 
@@ -272,13 +357,11 @@ echo "Disabling swap..."
 
 swapoff -a
 
-if [[ ! -f /etc/fstab.pre-k3s ]]; then
-    cp /etc/fstab /etc/fstab.pre-k3s
-fi
-
 sed -ri \
     '/^[^#].*[[:space:]]swap[[:space:]]/ s/^/# disabled-by-k3s-bootstrap: /' \
     /etc/fstab
+
+systemctl daemon-reload
 
 
 # ------------------------------------------------------------------------------
@@ -315,18 +398,37 @@ echo "[OK] Ubuntu prepared for K3s."
 
 
 # ==============================================================================
-# 5/9 - INSTALL K3S
+# 6/10 - INSTALL K3S
 # ==============================================================================
 
 echo
 echo "======================================================================"
-echo "[5/9] Installing K3s"
+echo "[6/10] Installing K3s"
 echo "======================================================================"
 
-echo
-echo "Installing the current stable K3s release..."
+if command -v k3s >/dev/null 2>&1 || systemctl list-unit-files k3s.service --no-legend 2>/dev/null | grep -q '^k3s\.service'; then
+    if ! command -v k3s >/dev/null 2>&1 || ! systemctl list-unit-files k3s.service --no-legend 2>/dev/null | grep -q '^k3s\.service'; then
+        echo
+        echo "[ERROR] An incomplete existing K3s installation was detected."
+        echo "The bootstrap will not reinstall or reset it automatically."
+        exit 1
+    fi
 
-curl -sfL https://get.k3s.io | sh -
+    echo
+    echo "Existing K3s installation detected; reusing it."
+else
+    echo
+    echo "Installing the current stable K3s release..."
+    curl -sfL https://get.k3s.io | sh -
+fi
+
+systemctl enable --now k3s
+
+if ! timeout 300 bash -c 'until k3s kubectl get --raw=/readyz >/dev/null 2>&1; do sleep 2; done'; then
+    echo
+    echo "[ERROR] The K3s Kubernetes API did not become ready within 300 seconds."
+    exit 1
+fi
 
 echo
 echo "K3s has been installed."
@@ -344,11 +446,11 @@ echo "Waiting for the Kubernetes node to register..."
 # Kubernetes to wait for the Ready condition.
 # ------------------------------------------------------------------------------
 
-until [[ "$(k3s kubectl get nodes --no-headers 2>/dev/null | wc -l)" -gt 0 ]]; do
-
-    sleep 2
-
-done
+if ! timeout 300 bash -c 'until k3s kubectl get nodes -o name 2>/dev/null | grep -q .; do sleep 2; done'; then
+    echo
+    echo "[ERROR] No Kubernetes node registered within 300 seconds."
+    exit 1
+fi
 
 echo
 echo "Node registered."
@@ -368,25 +470,32 @@ k3s kubectl get nodes -o wide
 
 
 # ==============================================================================
-# 6/9 - CONFIGURE KUBECTL
+# 7/10 - CONFIGURE KUBECTL
 # ==============================================================================
 
 echo
 echo "======================================================================"
-echo "[6/9] Configuring Kubernetes access"
+echo "[7/10] Configuring Kubernetes access"
 echo "======================================================================"
 
 if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
 
     USER_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
 
+    if [[ -z "$USER_HOME" || ! -d "$USER_HOME" ]]; then
+        echo
+        echo "[ERROR] Unable to determine a valid home directory for: $SUDO_USER"
+        exit 1
+    fi
+
     mkdir -p "$USER_HOME/.kube"
 
     cp /etc/rancher/k3s/k3s.yaml \
         "$USER_HOME/.kube/config"
 
-    chown -R "$SUDO_USER:$SUDO_USER" \
-        "$USER_HOME/.kube"
+    chown "$SUDO_USER:$SUDO_USER" \
+        "$USER_HOME/.kube" \
+        "$USER_HOME/.kube/config"
 
     chmod 600 \
         "$USER_HOME/.kube/config"
@@ -409,25 +518,34 @@ export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 
 
 # ==============================================================================
-# 7/9 - INSTALL HELM
+# 8/10 - INSTALL HELM
 # ==============================================================================
 
 echo
 echo "======================================================================"
-echo "[7/9] Installing Helm"
+echo "[8/10] Installing Helm"
 echo "======================================================================"
 
-HELM_INSTALLER="$(mktemp)"
+if command -v helm >/dev/null 2>&1; then
+    if ! helm version --short >/dev/null 2>&1; then
+        echo
+        echo "[ERROR] Helm exists but is not operational."
+        exit 1
+    fi
+    echo "Existing Helm installation detected; reusing it."
+else
+    HELM_INSTALLER="$(mktemp)"
+    trap 'rm -f "${HELM_INSTALLER:-}"' EXIT
 
-curl -fsSL \
-    https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 \
-    -o "$HELM_INSTALLER"
+    curl -fsSL \
+        https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 \
+        -o "$HELM_INSTALLER"
 
-chmod 700 "$HELM_INSTALLER"
-
-"$HELM_INSTALLER"
-
-rm -f "$HELM_INSTALLER"
+    chmod 700 "$HELM_INSTALLER"
+    "$HELM_INSTALLER"
+    rm -f "$HELM_INSTALLER"
+    trap - EXIT
+fi
 
 echo
 echo "[OK] Helm installed."
@@ -436,12 +554,12 @@ helm version --short
 
 
 # ==============================================================================
-# 8/9 - INSTALL CERT-MANAGER
+# 9/10 - INSTALL CERT-MANAGER
 # ==============================================================================
 
 echo
 echo "======================================================================"
-echo "[8/9] Installing cert-manager"
+echo "[9/10] Installing cert-manager"
 echo "======================================================================"
 
 helm repo add jetstack \
@@ -497,12 +615,12 @@ kubectl get pods \
 
 
 # ==============================================================================
-# 9/9 - INSTALL RANCHER
+# 10/10 - INSTALL RANCHER
 # ==============================================================================
 
 echo
 echo "======================================================================"
-echo "[9/9] Installing Rancher"
+echo "[10/10] Installing Rancher"
 echo "======================================================================"
 
 helm repo add rancher-stable \
@@ -518,15 +636,38 @@ echo "Hostname:"
 echo "  $RANCHER_HOST"
 echo
 
-helm upgrade --install rancher \
-    rancher-stable/rancher \
-    --namespace cattle-system \
-    --create-namespace \
-    --set hostname="$RANCHER_HOST" \
-    --set replicas=1 \
-    --set bootstrapPassword="$RANCHER_PASSWORD" \
-    --wait \
+RANCHER_HELM_ARGS=(
+    upgrade --install rancher
+    rancher-stable/rancher
+    --namespace cattle-system
+    --create-namespace
+    --set-string "hostname=$RANCHER_HOST"
+    --set replicas=1
+    --wait
     --timeout 10m
+)
+
+# bootstrapPassword applies only to the initial Rancher installation. Omitting
+# it on an upgrade avoids implying that it can reset an existing admin password.
+RANCHER_RELEASE_EXISTS="$(
+    helm list --all --namespace cattle-system -o json 2>/dev/null |
+        jq -r 'any(.[]; .name == "rancher")'
+)"
+if [[ "$RANCHER_RELEASE_EXISTS" != "true" ]]; then
+    echo "Choose the initial Rancher administrator password."
+    echo "Your typing will be hidden."
+    echo
+
+    RANCHER_PASSWORD=""
+    while [[ -z "$RANCHER_PASSWORD" ]]; do
+        read -rsp "Rancher bootstrap password: " RANCHER_PASSWORD
+        echo
+    done
+
+    RANCHER_HELM_ARGS+=(--set-string "bootstrapPassword=$RANCHER_PASSWORD")
+fi
+
+helm "${RANCHER_HELM_ARGS[@]}"
 
 echo
 echo "Waiting for Rancher to become ready..."
@@ -573,9 +714,29 @@ echo "                    FINAL VALIDATION"
 echo "======================================================================"
 
 echo
+echo "VirtioFS data mount:"
+echo "----------------------------------------------------------------------"
+
+if [[ "$(findmnt -rn -M /mnt/data -o FSTYPE)" != "virtiofs" || \
+      "$(findmnt -rn -M /mnt/data -o SOURCE)" != "data" ]]; then
+    echo "[ERROR] /mnt/data is not mounted from VirtioFS source 'data'."
+    exit 1
+fi
+echo "[OK] VirtioFS data share mounted at /mnt/data."
+
+echo
 echo "Kubernetes node:"
 echo "----------------------------------------------------------------------"
 
+if ! systemctl is-active --quiet k3s; then
+    echo "[ERROR] K3s service is not active."
+    exit 1
+fi
+
+if ! kubectl wait --for=condition=Ready nodes --all --timeout=30s; then
+    echo "[ERROR] Kubernetes node Ready validation failed."
+    exit 1
+fi
 kubectl get nodes -o wide
 
 
@@ -583,6 +744,9 @@ echo
 echo "cert-manager:"
 echo "----------------------------------------------------------------------"
 
+kubectl rollout status deployment/cert-manager --namespace cert-manager --timeout=60s
+kubectl rollout status deployment/cert-manager-cainjector --namespace cert-manager --timeout=60s
+kubectl rollout status deployment/cert-manager-webhook --namespace cert-manager --timeout=60s
 kubectl get pods \
     --namespace cert-manager
 
@@ -591,6 +755,7 @@ echo
 echo "Rancher:"
 echo "----------------------------------------------------------------------"
 
+kubectl rollout status deployment/rancher --namespace cattle-system --timeout=60s
 kubectl get pods \
     --namespace cattle-system
 
@@ -599,8 +764,18 @@ echo
 echo "Rancher ingress:"
 echo "----------------------------------------------------------------------"
 
+if ! kubectl get ingress rancher --namespace cattle-system >/dev/null 2>&1; then
+    echo "[ERROR] Rancher ingress does not exist."
+    exit 1
+fi
 kubectl get ingress \
     --namespace cattle-system
+
+if ! helm version --short >/dev/null 2>&1; then
+    echo
+    echo "[ERROR] Helm validation failed."
+    exit 1
+fi
 
 
 # ==============================================================================
