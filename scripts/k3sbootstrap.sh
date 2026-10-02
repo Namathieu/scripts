@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 
+# Orchestrator metadata (lower values run first).
+PRIORITY=10
+SCRIPT_NAME="K3s and Rancher"
+
 set -Eeuo pipefail
 
 # ==============================================================================
@@ -36,6 +40,7 @@ fi
 # COLLECT REQUIRED INFORMATION
 # ==============================================================================
 
+if [[ "${ORCHESTRATOR_MODE:-0}" != "1" ]]; then
 clear
 
 echo "======================================================================"
@@ -59,6 +64,7 @@ echo "Azure DevOps phase."
 echo
 echo "----------------------------------------------------------------------"
 echo
+fi
 
 
 # ------------------------------------------------------------------------------
@@ -75,7 +81,9 @@ DETECTED_IP="$(
 
 if [[ -n "$DETECTED_IP" ]]; then
 
-    read -rp "Server IP address [$DETECTED_IP]: " SERVER_IP
+    if [[ -z "${SERVER_IP:-}" ]]; then
+        read -rp "Server IP address [$DETECTED_IP]: " SERVER_IP
+    fi
     SERVER_IP="${SERVER_IP:-$DETECTED_IP}"
 
 else
@@ -121,7 +129,9 @@ echo "This does NOT change the Ubuntu hostname."
 echo "Your permanent DNS name can be configured later."
 echo
 
-read -rp "Rancher hostname [$DEFAULT_RANCHER_HOST]: " RANCHER_HOST
+if [[ -z "${RANCHER_HOST:-}" ]]; then
+    read -rp "Rancher hostname [$DEFAULT_RANCHER_HOST]: " RANCHER_HOST
+fi
 RANCHER_HOST="${RANCHER_HOST:-$DEFAULT_RANCHER_HOST}"
 
 if [[ ${#RANCHER_HOST} -gt 253 || ! "$RANCHER_HOST" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*$ ]]; then
@@ -157,7 +167,11 @@ echo
 echo "======================================================================"
 echo
 
-read -rp "Start installation? [y/N]: " CONFIRM
+if [[ "${ORCHESTRATOR_MODE:-0}" == "1" ]]; then
+    CONFIRM=yes
+else
+    read -rp "Start installation? [y/N]: " CONFIRM
+fi
 
 case "${CONFIRM,,}" in
 
@@ -682,7 +696,7 @@ if [[ "$RANCHER_RELEASE_EXISTS" != "true" ]]; then
     echo "Your typing will be hidden."
     echo
 
-    RANCHER_PASSWORD=""
+    RANCHER_PASSWORD="${RANCHER_PASSWORD:-}"
     while [[ -z "$RANCHER_PASSWORD" ]]; do
         read -rsp "Rancher bootstrap password: " RANCHER_PASSWORD
         echo

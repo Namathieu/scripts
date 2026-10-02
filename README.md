@@ -1,3 +1,13 @@
-Thanks me later
+# HomeLab installation scripts
 
-wget https://raw.githubusercontent.com/Namathieu/scripts/refs/heads/main/{ado-agent.sh,k3sbootstrap.sh,terminal-theme.sh} && chmod +x ado-agent.sh k3sbootstrap.sh terminal-theme.sh && sudo ./k3sbootstrap.sh && sudo ./ado-agent.sh && sudo ./terminal-theme.sh
+Run the root-level orchestrator. It lets you select one or more installers,
+collects every required value before making changes, and executes the selected
+installers by their numeric `PRIORITY` metadata. Terminal customization has a
+late priority so it runs last when selected.
+
+```bash
+chmod +x orchestrator.sh scripts/*.sh
+sudo ./orchestrator.sh
+```
+
+Individual installers remain directly executable from the `scripts/` folder.

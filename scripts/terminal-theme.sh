@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 
+# Keep shell customization last so earlier installers retain a stable shell.
+PRIORITY=90
+SCRIPT_NAME="Terminal theme (Zsh and Prezto)"
+
 set -Eeuo pipefail
 
 # ==============================================================================

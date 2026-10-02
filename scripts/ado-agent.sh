@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 
+# Orchestrator metadata (lower values run first).
+PRIORITY=20
+SCRIPT_NAME="Azure DevOps agent"
+
 set -Eeuo pipefail
 
 # ==============================================================================
@@ -77,6 +81,7 @@ fi
 # INTRODUCTION
 # ==============================================================================
 
+if [[ "${ORCHESTRATOR_MODE:-0}" != "1" ]]; then
 clear
 
 echo "======================================================================"
@@ -100,6 +105,7 @@ echo "The PAT will NOT be saved in this script."
 echo
 echo "----------------------------------------------------------------------"
 echo
+fi
 
 
 # ==============================================================================
@@ -108,7 +114,9 @@ echo
 
 while true; do
 
-    read -rp "Azure DevOps organization URL: " ADO_URL
+    if [[ -z "${ADO_URL:-}" ]]; then
+        read -rp "Azure DevOps organization URL: " ADO_URL
+    fi
 
     # Remove trailing slash if entered.
 
@@ -156,7 +164,9 @@ echo
 echo "The server hostname is usually a good choice."
 echo
 
-read -rp "Agent name [$DEFAULT_AGENT_NAME]: " ADO_AGENT_NAME
+if [[ -z "${ADO_AGENT_NAME:-}" ]]; then
+    read -rp "Agent name [$DEFAULT_AGENT_NAME]: " ADO_AGENT_NAME
+fi
 
 ADO_AGENT_NAME="${ADO_AGENT_NAME:-$DEFAULT_AGENT_NAME}"
 
@@ -171,7 +181,7 @@ echo
 echo "The token will be hidden while you type."
 echo
 
-ADO_PAT=""
+ADO_PAT="${ADO_PAT:-}"
 
 while [[ -z "$ADO_PAT" ]]; do
 
@@ -191,7 +201,9 @@ echo
 echo "The Azure DevOps agent needs a directory on this server."
 echo
 
-read -rp "Agent directory [$DEFAULT_AGENT_DIR]: " ADO_AGENT_DIR
+if [[ -z "${ADO_AGENT_DIR:-}" ]]; then
+    read -rp "Agent directory [$DEFAULT_AGENT_DIR]: " ADO_AGENT_DIR
+fi
 
 ADO_AGENT_DIR="${ADO_AGENT_DIR:-$DEFAULT_AGENT_DIR}"
 
@@ -226,7 +238,11 @@ echo
 echo "======================================================================"
 echo
 
-read -rp "Install Azure DevOps agent? [y/N]: " CONFIRM
+if [[ "${ORCHESTRATOR_MODE:-0}" == "1" ]]; then
+    CONFIRM=yes
+else
+    read -rp "Install Azure DevOps agent? [y/N]: " CONFIRM
+fi
 
 case "${CONFIRM,,}" in
 
