@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
 
+set -Eeuo pipefail
+
 # ==============================================================================
 # TERMINAL CUSTOMIZATION - ZSH + PREZTO
 # ==============================================================================
+
+if [[ $EUID -ne 0 ]]; then
+    echo "Please run this script with sudo:"
+    echo "  sudo ./terminal-theme.sh"
+    exit 1
+fi
 
 echo
 echo "Installing Zsh + Prezto terminal customization..."

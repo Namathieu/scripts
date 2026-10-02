@@ -23,8 +23,8 @@ set -Eeuo pipefail
 #
 # Intended usage:
 #
-#   chmod +x install-ado-agent.sh
-#   sudo ./install-ado-agent.sh
+#   chmod +x ado-agent.sh
+#   sudo ./ado-agent.sh
 #
 # ==============================================================================
 
@@ -37,7 +37,7 @@ if [[ $EUID -ne 0 ]]; then
     echo
     echo "Please run this script with sudo:"
     echo
-    echo "  sudo ./install-ado-agent.sh"
+    echo "  sudo ./ado-agent.sh"
     echo
     exit 1
 fi
@@ -59,7 +59,7 @@ if [[ -z "$TARGET_USER" || "$TARGET_USER" == "root" ]]; then
     echo
     echo "Run this script from your normal account using:"
     echo
-    echo "  sudo ./install-ado-agent.sh"
+    echo "  sudo ./ado-agent.sh"
     echo
     exit 1
 fi

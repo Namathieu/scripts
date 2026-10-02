@@ -267,28 +267,72 @@ echo "======================================================================"
 echo "[4/10] Configuring VirtioFS data mount"
 echo "======================================================================"
 
-mkdir -p /mnt/data
+VIRTIOFS_TAG="data"
+VIRTIOFS_MOUNT="/mnt/data"
+VIRTIOFS_FSTAB_ENTRY="data /mnt/data virtiofs defaults,nofail 0 0"
 
-# Preserve the original fstab before adding the persistent VirtioFS entry.
+mkdir -p "$VIRTIOFS_MOUNT"
+
+# Preserve the original fstab before this bootstrap changes it.
 if [[ ! -f /etc/fstab.pre-k3s ]]; then
     cp /etc/fstab /etc/fstab.pre-k3s
 fi
 
-# Refuse to interfere with any filesystem other than the expected share.
-if findmnt -rn -M /mnt/data >/dev/null; then
-    MOUNT_TYPE="$(findmnt -rn -M /mnt/data -o FSTYPE)"
-    MOUNT_SOURCE="$(findmnt -rn -M /mnt/data -o SOURCE)"
+# The guest kernel must support VirtioFS. Try loading the module first.
+if ! grep -qw virtiofs /proc/filesystems; then
+    modprobe virtiofs 2>/dev/null || true
+fi
 
-    if [[ "$MOUNT_TYPE" != "virtiofs" || "$MOUNT_SOURCE" != "data" ]]; then
+if ! grep -qw virtiofs /proc/filesystems; then
+    echo
+    echo "[ERROR] This Ubuntu kernel does not currently expose VirtioFS support."
+    echo "Kernel: $(uname -r)"
+    echo "Check the guest kernel/modules before continuing."
+    exit 1
+fi
+
+# Refuse to interfere with an unexpected existing mount.
+if findmnt -rn -M "$VIRTIOFS_MOUNT" >/dev/null; then
+    MOUNT_TYPE="$(findmnt -rn -M "$VIRTIOFS_MOUNT" -o FSTYPE)"
+    MOUNT_SOURCE="$(findmnt -rn -M "$VIRTIOFS_MOUNT" -o SOURCE)"
+
+    if [[ "$MOUNT_TYPE" != "virtiofs" || "$MOUNT_SOURCE" != "$VIRTIOFS_TAG" ]]; then
         echo
-        echo "[ERROR] /mnt/data is already mounted from '$MOUNT_SOURCE' as '$MOUNT_TYPE'."
-        echo "Expected VirtioFS source 'data'. No changes were made to that mount."
+        echo "[ERROR] $VIRTIOFS_MOUNT is already mounted from '$MOUNT_SOURCE' as '$MOUNT_TYPE'."
+        echo "Expected VirtioFS source '$VIRTIOFS_TAG'. No changes were made to that mount."
+        exit 1
+    fi
+else
+    # Test the Proxmox VirtioFS device BEFORE writing a persistent fstab entry.
+    # If the Proxmox mapping/device is missing, fail with diagnostics and leave
+    # /etc/fstab unchanged.
+    if ! mount -t virtiofs "$VIRTIOFS_TAG" "$VIRTIOFS_MOUNT"; then
+        echo
+        echo "[ERROR] Unable to mount VirtioFS tag '$VIRTIOFS_TAG' at $VIRTIOFS_MOUNT."
+        echo "The mount command is valid, but the guest could not use the VirtioFS share."
+        echo
+        echo "Verify on the Proxmox host that this VM has a VirtioFS device using tag: $VIRTIOFS_TAG"
+        echo "Then fully stop/start the VM if the VirtioFS device was added while it was running."
+        echo
+        echo "Guest diagnostics:"
+        echo "  Kernel: $(uname -r)"
+        echo "  VirtioFS support: $(grep -qw virtiofs /proc/filesystems && echo yes || echo no)"
+        echo "  Recent kernel messages:"
+        dmesg 2>/dev/null | tail -n 20 || true
         exit 1
     fi
 fi
 
-# Accept one semantically exact entry, but reject duplicates or competing
-# active entries for this mount point.
+# Validate the live mount before making it persistent.
+MOUNT_TYPE="$(findmnt -rn -M "$VIRTIOFS_MOUNT" -o FSTYPE)"
+MOUNT_SOURCE="$(findmnt -rn -M "$VIRTIOFS_MOUNT" -o SOURCE)"
+if [[ "$MOUNT_TYPE" != "virtiofs" || "$MOUNT_SOURCE" != "$VIRTIOFS_TAG" ]]; then
+    echo
+    echo "[ERROR] $VIRTIOFS_MOUNT is not mounted from VirtioFS source '$VIRTIOFS_TAG'."
+    exit 1
+fi
+
+# Only now make the working mount persistent. Reject competing entries.
 FSTAB_CORRECT_COUNT="$(awk '
     /^[[:space:]]*#/ || NF == 0 { next }
     $2 == "/mnt/data" && $1 == "data" && $3 == "virtiofs" && $4 == "defaults,nofail" && $5 == "0" && $6 == "0" { count++ }
@@ -310,27 +354,12 @@ elif (( FSTAB_TARGET_COUNT > FSTAB_CORRECT_COUNT )); then
     echo "Resolve it manually; the bootstrap did not rewrite /etc/fstab."
     exit 1
 elif (( FSTAB_CORRECT_COUNT == 0 )); then
-    printf '%s\n' 'data /mnt/data virtiofs defaults,nofail 0 0' >>/etc/fstab
+    printf '%s\n' "$VIRTIOFS_FSTAB_ENTRY" >>/etc/fstab
     systemctl daemon-reload
 fi
 
-if ! findmnt -rn -M /mnt/data >/dev/null; then
-    if ! mount /mnt/data; then
-        echo
-        echo "[ERROR] Unable to mount VirtioFS source 'data' at /mnt/data."
-        exit 1
-    fi
-fi
-
-if [[ "$(findmnt -rn -M /mnt/data -o FSTYPE)" != "virtiofs" || \
-      "$(findmnt -rn -M /mnt/data -o SOURCE)" != "data" ]]; then
-    echo
-    echo "[ERROR] /mnt/data is not mounted from VirtioFS source 'data'."
-    exit 1
-fi
-
 echo
-echo "[OK] VirtioFS data share mounted at /mnt/data."
+echo "[OK] VirtioFS data share mounted at $VIRTIOFS_MOUNT."
 
 
 # ==============================================================================
