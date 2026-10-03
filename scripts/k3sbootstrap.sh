@@ -236,6 +236,7 @@ apt-get install -y \
     jq \
     openssl \
     tar \
+    tree \
     unzip
 
 echo
